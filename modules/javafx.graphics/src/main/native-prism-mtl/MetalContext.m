@@ -819,8 +819,7 @@ JNIEXPORT jlong JNICALL Java_com_sun_prism_mtl_MTLContext_nInitialize
         return 0L;
     }
 
-    // FIXME KCR: remove debug print
-    NSLog(@"shaderLibBuffer OK, addr: 0x%p, numBytes: %ld", dataPtr, numBytes);
+    CTX_LOG(@"shaderLibBuffer :: addr: 0x%p, numBytes: %ld", dataPtr, numBytes);
 
     // We use a no-op destructor because the direct ByteBuffer is managed on the
     // Java side. We must not free it here.

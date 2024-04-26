@@ -97,10 +97,6 @@ public class MTLContext extends BaseShaderContext {
         try {
             try (var in = new BufferedInputStream(clazz.getResourceAsStream(shaderLibName))) {
                 byte[] data = in.readAllBytes();
-
-                // FIXME KCR: remove debug print
-                System.err.println("Read " + shaderLibName + " (" + data.length + " bytes)");
-
                 shaderLibBuffer = ByteBuffer.allocateDirect(data.length);
                 shaderLibBuffer.put(data);
             }
