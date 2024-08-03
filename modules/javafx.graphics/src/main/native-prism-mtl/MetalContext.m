@@ -57,6 +57,7 @@
     CTX_LOG(@"-> MetalContext.createContext()");
     self = [super init];
     if (self) {
+        transientBuffersForCB = [[NSMutableArray alloc] init];
         isScissorEnabled = false;
         currentRenderEncoder = nil;
         linearSamplerDict = [[NSMutableDictionary alloc] init];
@@ -80,18 +81,27 @@
             byteToFloatTable[i] = ((float)i) / 255.0f;
         }
 
+        pixelBuffer = [device newBufferWithLength:4 options:MTLResourceStorageModeShared];
+
         // clearing rtt related initialization
-        identityMatrix = simd_matrix(
+        identityMatrixBuf = [device newBufferWithLength:sizeof(simd_float4x4)
+                                                options:MTLResourceStorageModeShared];
+        simd_float4x4* identityMatrix = (simd_float4x4*)identityMatrixBuf.contents;
+
+        *identityMatrix = simd_matrix(
             (simd_float4) { 1, 0, 0, 0 },
             (simd_float4) { 0, 1, 0, 0 },
             (simd_float4) { 0, 0, 1, 0 },
             (simd_float4) { 0, 0, 0, 1 }
         );
 
+        clearEntireRttVerticesBuf = [device newBufferWithLength:sizeof(CLEAR_VS_INPUT) * 6
+                                                        options:MTLResourceStorageModeShared];
+        CLEAR_VS_INPUT* clearEntireRttVertices = (CLEAR_VS_INPUT*)clearEntireRttVerticesBuf.contents;
+
         clearEntireRttVertices[0].position.x = -1; clearEntireRttVertices[0].position.y = -1;
         clearEntireRttVertices[1].position.x = -1; clearEntireRttVertices[1].position.y =  1;
         clearEntireRttVertices[2].position.x =  1; clearEntireRttVertices[2].position.y = -1;
-
         clearEntireRttVertices[3].position.x = -1; clearEntireRttVertices[3].position.y =  1;
         clearEntireRttVertices[4].position.x =  1; clearEntireRttVertices[4].position.y = -1;
         clearEntireRttVertices[5].position.x =  1; clearEntireRttVertices[5].position.y =  1;
@@ -99,13 +109,19 @@
     return self;
 }
 
-- (void) setRTT:(MetalRTTexture*)rttPtr
+- (int) setRTT:(MetalRTTexture*)rttPtr
 {
     if (rtt != rttPtr) {
         CTX_LOG(@"-> Native: MetalContext.setRTT() endCurrentRenderEncoder");
         [self endCurrentRenderEncoder];
     }
+    // TODO: MTL:
+    // The method can possibly be optmized(with no significant gain in FPS)
+    // to avoid updating RenderPassDescriptor if the render target
+    // is not being changed.
     rtt = rttPtr;
+    id<MTLTexture> mtlTex = [rtt getTexture];
+    [self validatePixelBuffer:(mtlTex.width * mtlTex.height * 4)];
     CTX_LOG(@"-> Native: MetalContext.setRTT() %lu , %lu",
                     [rtt getTexture].width, [rtt getTexture].height);
     if ([rttPtr isMSAAEnabled]) {
@@ -117,13 +133,44 @@
         rttPassDesc.colorAttachments[0].texture = [rtt getTexture];
         rttPassDesc.colorAttachments[0].resolveTexture = nil;
     }
-    [self resetClip];
+    [self resetClipRect];
+    return 1;
 }
 
 - (MetalRTTexture*) getRTT
 {
     CTX_LOG(@"-> Native: MetalContext.getRTT()");
     return rtt;
+}
+
+- (void) validatePixelBuffer:(NSUInteger)length
+{
+    if ([pixelBuffer length] < length) {
+        [transientBuffersForCB addObject:pixelBuffer];
+        pixelBuffer = [device newBufferWithLength:length options:MTLResourceStorageModeShared];
+    }
+}
+
+- (id<MTLBuffer>) getPixelBuffer
+{
+    return pixelBuffer;
+}
+
+- (id<MTLBuffer>) getTransientBufferWithBytes:(const void *)pointer length:(NSUInteger)length
+{
+    id<MTLBuffer> transientBuf = [device newBufferWithBytes:pointer
+                                                     length:length
+                                                    options:MTLResourceStorageModeShared];
+    [transientBuffersForCB addObject:transientBuf];
+    return transientBuf;
+}
+
+- (id<MTLBuffer>) getTransientBufferWithLength:(NSUInteger)length
+{
+    id<MTLBuffer> transientBuf = [device newBufferWithLength:length
+                                                     options:MTLResourceStorageModeShared];
+    [transientBuffersForCB addObject:transientBuf];
+    return transientBuf;
 }
 
 - (id<MTLSamplerState>) getSampler:(bool)isLinear
@@ -169,22 +216,36 @@
 
 - (void) commitCurrentCommandBuffer
 {
-    [self endCurrentRenderEncoder];
-
-    [currentCommandBuffer commit];
-    if (![[MetalRingBuffer getInstance] isBufferAvailable]) {
-        [currentCommandBuffer waitUntilCompleted];
-    }
-    currentCommandBuffer = nil;
-    [[MetalRingBuffer getInstance] updateBufferInUse];
+    [self commitCurrentCommandBuffer:false];
 }
 
 - (void) commitCurrentCommandBufferAndWait
 {
+    [self commitCurrentCommandBuffer:true];
+}
+
+- (void) commitCurrentCommandBuffer:(bool)waitUntilCompleted
+{
     [self endCurrentRenderEncoder];
 
+    NSMutableArray* bufsForCB = transientBuffersForCB;
+    transientBuffersForCB = [[NSMutableArray alloc] init];
+
+    [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
+         for (id buffer in bufsForCB) {
+            [buffer release];
+        }
+        [bufsForCB removeAllObjects];
+        [bufsForCB release];
+    }];
+
     [currentCommandBuffer commit];
-    [currentCommandBuffer waitUntilCompleted];
+
+    if (waitUntilCompleted ||
+            ![[MetalRingBuffer getInstance] isBufferAvailable]) {
+        [currentCommandBuffer waitUntilCompleted];
+    }
+
     currentCommandBuffer = nil;
     [[MetalRingBuffer getInstance] updateBufferInUse];
 }
@@ -202,10 +263,10 @@
 
         unsigned int rbid = [[MetalRingBuffer getInstance] getCurrentBufferIndex];
         [currentCommandBuffer addCompletedHandler:^(id<MTLCommandBuffer> cb) {
-             if ([MetalRingBuffer getInstance] != nil) {
-                 [[MetalRingBuffer getInstance] resetBuffer:rbid];
-             }
-             CTX_LOG(@"------------------> Native: commandBuffer Completed");
+            if ([MetalRingBuffer getInstance] != nil) {
+                [[MetalRingBuffer getInstance] resetBuffer:rbid];
+            }
+            CTX_LOG(@"------------------> Native: commandBuffer Completed");
         }];
     }
     return currentCommandBuffer;
@@ -224,7 +285,7 @@
 {
     if (currentRenderEncoder != nil) {
         [currentRenderEncoder endEncoding];
-       currentRenderEncoder = nil;
+        currentRenderEncoder = nil;
     }
 }
 
@@ -253,6 +314,23 @@
     CTX_LOG(@"MetalContext.drawIndexedQuads()");
 
     CTX_LOG(@"numVerts = %lu", numVerts);
+
+    int numQuads = numVerts / 4;
+    int numVertices = numQuads * 6;
+    int vbLength = sizeof(VS_INPUT) * numVertices;
+
+    id<MTLBuffer> vertexBuffer = [[MetalRingBuffer getInstance] getBuffer];
+    int offset = [[MetalRingBuffer getInstance] reserveBytes:vbLength];
+
+    if (offset < 0) {
+        vertexBuffer = [self getTransientBufferWithLength:vbLength];
+        offset = 0;
+    }
+
+    [self fillVB:pSrcXYZUVs
+          colors:pSrcColors
+        numQuads:numQuads
+              vb:(vertexBuffer.contents + offset)];
 
     MetalShader* shader = [self getCurrentShader];
     [shader copyArgBufferToRingBuffer];
@@ -293,40 +371,13 @@
 
     [renderEncoder setScissorRect:[self getScissorRect]];
 
-    int numQuads = numVerts/4;
+    [renderEncoder setVertexBuffer:vertexBuffer
+                            offset:offset
+                           atIndex:VertexInputIndexVertices];
 
-    // size of VS_INPUT is 48 bytes
-    // We can use setVertexBytes() method to pass a vertext buffer of max size 4KB
-    // 4096 / 48 = 85 vertices at a time.
-
-    // No of quads when represneted as 2 triangles of 3 vertices each = 85/6 = 14
-    // We can issue 14 quads draw from a single vertex buffer batch
-    // 14 quads ==> 14 * 4 vertices = 56 vertices
-
-    // FillVB methods fills 84 vertices in vertex batch from 56 given vertices
-    // Send 56 vertices at max in each iteration
-
-    while (numQuads > 0) {
-        int quadsInBatch = numQuads > MAX_QUADS_IN_A_BATCH ? MAX_QUADS_IN_A_BATCH : numQuads;
-        int vertsInBatch = quadsInBatch * 6;
-        CTX_LOG(@"Quads in this iteration =========== %d", quadsInBatch);
-
-        [self fillVB:pSrcXYZUVs
-              colors:pSrcColors
-              numVertices:quadsInBatch * 4];
-
-        [renderEncoder setVertexBytes:vertices
-                               length:sizeof(VS_INPUT) * vertsInBatch
-                              atIndex:VertexInputIndexVertices];
-
-        [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle
-                          vertexStart:0
-                          vertexCount:vertsInBatch];
-
-        numQuads   -= quadsInBatch;
-        pSrcXYZUVs += quadsInBatch * 4;
-        pSrcColors += quadsInBatch * 16;
-    }
+    [renderEncoder drawPrimitives:MTLPrimitiveTypeTriangle
+                      vertexStart:0
+                      vertexCount:numVertices];
 
     return 1;
 }
@@ -448,13 +499,13 @@
     } else {
         CTX_LOG(@"     MetalContext.clearRTT()     clearing whole rtt");
 
-        [renderEncoder setVertexBytes:&identityMatrix
-                               length:sizeof(identityMatrix)
-                              atIndex:VertexInputMatrixMVP];
+        [renderEncoder setVertexBuffer:identityMatrixBuf
+                                offset:0
+                               atIndex:VertexInputMatrixMVP];
 
-        [renderEncoder setVertexBytes:clearEntireRttVertices
-                               length:sizeof(clearEntireRttVertices)
-                              atIndex:VertexInputIndexVertices];
+        [renderEncoder setVertexBuffer:clearEntireRttVerticesBuf
+                                offset:0
+                               atIndex:VertexInputIndexVertices];
     }
 
     [renderEncoder setFragmentBytes:clearColor
@@ -477,15 +528,19 @@
     CTX_LOG(@">>>> MetalContext.setClipRect()");
     CTX_LOG(@"     MetalContext.setClipRect() x = %d, y = %d, width = %d, height = %d", x, y, width, height);
     id<MTLTexture> currRtt = [rtt getTexture];
-    if (x <= 0 && y <= 0 && width >= currRtt.width && height >= currRtt.height) {
+    int x1 = x + width;
+    int y1 = y + height;
+    if (x <= 0 && y <= 0 && x1 >= currRtt.width && y1 >= currRtt.height) {
         CTX_LOG(@"     MetalContext.setClipRect() 1 resetting clip, %lu, %lu", currRtt.width, currRtt.height);
-        [self resetClip];
+        [self resetClipRect];
     } else {
         CTX_LOG(@"     MetalContext.setClipRect() 2");
-        if (x < 0)                        x = 0;
-        if (y < 0)                        y = 0;
-        if (width  > currRtt.width)  width  = currRtt.width;
-        if (height > currRtt.height) height = currRtt.height;
+        if (x < 0)                    x = 0;
+        if (y < 0)                    y = 0;
+        if (x1 > currRtt.width)  width  = currRtt.width - x;
+        if (y1 > currRtt.height) height = currRtt.height - y;
+        if (x > x1)              width  = x = 0;
+        if (y > y1)              height = y = 0;
         scissorRect.x = x;
         scissorRect.y = y;
         scissorRect.width  = width;
@@ -509,9 +564,9 @@
     CTX_LOG(@"<<<< MetalContext.setClipRect()");
 }
 
-- (void) resetClip
+- (void) resetClipRect
 {
-    CTX_LOG(@">>>> MetalContext.resetClip()");
+    CTX_LOG(@">>>> MetalContext.resetClipRect()");
     isScissorEnabled = false;
     scissorRect.x = 0;
     scissorRect.y = 0;
@@ -530,15 +585,14 @@
     );
 }
 
-- (void) fillVB:(struct PrismSourceVertex const *)pSrcXYZUVs colors:(char const *)pSrcColors
-                 numVertices:(int)numVerts
+- (void) fillVB:(struct PrismSourceVertex const *)pSrcXYZUVs
+         colors:(char const *)pSrcColors
+       numQuads:(int)numQuads
+             vb:(void*)vb
 {
-    VS_INPUT* pVert = vertices;
-    numTriangles = numVerts >> 1;
-    int numQuads = numTriangles >> 1;
+    VS_INPUT* pVert = (VS_INPUT*)vb;
 
-
-    CTX_LOG(@"fillVB : numVerts = %d, numTriangles = %lu, numQuads = %d", numVerts, numTriangles, numQuads);
+    CTX_LOG(@"fillVB : numQuads = %d", numQuads);
 
     for (int i = 0; i < numQuads; i++) {
         unsigned char const* colors = (unsigned char*)(pSrcColors + i * 16);
@@ -759,6 +813,22 @@
     }
     [linearSamplerDict release];
     [nonLinearSamplerDict release];
+    [transientBuffersForCB release];
+
+    if (identityMatrixBuf != nil) {
+        [identityMatrixBuf release];
+        identityMatrixBuf = nil;
+    }
+
+    if (clearEntireRttVerticesBuf != nil) {
+        [clearEntireRttVerticesBuf release];
+        clearEntireRttVerticesBuf = nil;
+    }
+
+    if (pixelBuffer != nil) {
+        [pixelBuffer release];
+        pixelBuffer = nil;
+    }
 
     device = nil;
 
@@ -858,13 +928,13 @@ JNIEXPORT jint JNICALL Java_com_sun_prism_mtl_MTLContext_nDrawIndexedQuads
     return 1;
 }
 
-JNIEXPORT void JNICALL Java_com_sun_prism_mtl_MTLContext_nUpdateRenderTarget
+JNIEXPORT int JNICALL Java_com_sun_prism_mtl_MTLContext_nUpdateRenderTarget
   (JNIEnv *env, jclass jClass, jlong context, jlong texPtr, jboolean depthTest)
 {
     CTX_LOG(@"MTLContext_nUpdateRenderTarget");
     MetalContext *mtlContext = (MetalContext *)jlong_to_ptr(context);
     MetalRTTexture *rtt = (MetalRTTexture *)jlong_to_ptr(texPtr);
-    [mtlContext setRTT:rtt];
+    int ret = [mtlContext setRTT:rtt];
     // TODO: MTL: If we create depth texture while creating RTT
     // then also current implementation works fine. So in future
     // if we see any performance/state impact we should move
@@ -872,6 +942,7 @@ JNIEXPORT void JNICALL Java_com_sun_prism_mtl_MTLContext_nUpdateRenderTarget
     if (depthTest) {
         [mtlContext verifyDepthTexture];
     }
+    return ret;
 }
 
 /*
@@ -896,7 +967,7 @@ JNIEXPORT void JNICALL Java_com_sun_prism_mtl_MTLContext_nResetClipRect
 {
     CTX_LOG(@"MTLContext_nResetClipRect");
     MetalContext *pCtx = (MetalContext*)jlong_to_ptr(ctx);
-    [pCtx resetClip];
+    [pCtx resetClipRect];
 }
 
 JNIEXPORT jint JNICALL Java_com_sun_prism_mtl_MTLContext_nResetTransform

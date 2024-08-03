@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2011, 2023, Oracle and/or its affiliates. All rights reserved.
+ * Copyright (c) 2011, 2024, Oracle and/or its affiliates. All rights reserved.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  * This code is free software; you can redistribute it and/or modify it
@@ -35,8 +35,6 @@
 #import "GlassLayer3D.h"
 #import "GlassApplication.h"
 #import "GlassScreen.h"
-
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 //#define VERBOSE
 #ifndef VERBOSE
@@ -327,17 +325,6 @@
     [super setFrameSize:newSize];
     [self->_delegate setFrameSize:newSize];
 
-
-    GlassLayer3D *layer = (GlassLayer3D*)[self layer];
-
-    CGFloat scale = GetScreenScaleFactor([[NSScreen screens] objectAtIndex:0]);
-
-    int width = newSize.width * scale;
-    int height = newSize.height * scale;
-
-    CGSize s = {width, height};
-    [layer setDrawableSize:s];
-
     //NSLog(@"newSize View frame width x height (%f, %f)", [self frame].size.width, [self frame].size.height);
 }
 
@@ -605,20 +592,15 @@
     //if (self->_drawCounter == 0)
     {
         GlassLayer3D *layer = (GlassLayer3D*)[self layer];
-        NSRect bounds = (self->isHiDPIAware && [self respondsToSelector:@selector(convertRectToBacking:)]) ?
+
+        // TODO: MTL: implement isHiDPIAware similar to ES2 if needed, else remove it.
+        NSRect bounds = (/*self->isHiDPIAware &&*/ [self respondsToSelector:@selector(convertRectToBacking:)]) ?
             [self convertRectToBacking:[self bounds]] : [self bounds];
 
+        [[layer getPainterOffscreen] bindForWidth:bounds.size.width andHeight:bounds.size.height];
 
-        CGFloat scale = GetScreenScaleFactor([[NSScreen screens] objectAtIndex:0]);
-
-        int width = bounds.size.width * scale;
-        int height = bounds.size.height * scale;
-        [[layer getPainterOffscreen] bindForWidth:width andHeight:height];
-
-        //CGSize s = {width, height};
-        //[layer setDrawableSize:s];
-
-        //[[layer getPainterOffscreen] bindForWidth:(GLuint)bounds.size.width andHeight:(GLuint)bounds.size.height];
+        CGSize s = {bounds.size.width, bounds.size.height};
+        [layer setDrawableSize:s];
     }
     //self->_drawCounter++;
 }
@@ -814,7 +796,7 @@
 - (void)notifyScaleFactorChanged:(CGFloat)scale
 {
     GlassLayer3D *layer = (GlassLayer3D*)[self layer];
-    //TODO MTL: [layer notifyScaleFactorChanged:scale];
+    [layer notifyScaleFactorChanged:scale];
 }
 
 /* Accessibility support */

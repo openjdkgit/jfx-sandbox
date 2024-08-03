@@ -69,11 +69,11 @@ typedef enum VertexInputIndex {
     float byteToFloatTable[256];
     simd_float4x4 mvpMatrix;
     simd_float4x4 worldMatrix;
-    simd_float4x4 identityMatrix;
-    VS_INPUT vertices[85];//TODO: MTL: this should not exceed 4KB if we need to use setVertexBytes
-    NSUInteger numTriangles;
+
+    // clear rtt
     CLEAR_VS_INPUT clearScissorRectVertices[6];
-    CLEAR_VS_INPUT clearEntireRttVertices[6];
+    id<MTLBuffer> clearEntireRttVerticesBuf;
+    id<MTLBuffer> identityMatrixBuf;
 
     id<MTLDevice> device;
     id<MTLCommandQueue> commandQueue;
@@ -107,6 +107,10 @@ typedef enum VertexInputIndex {
     NSUInteger currentBufferIndex;
 
     int compositeMode;
+    int cullMode;
+
+    NSMutableArray* transientBuffersForCB;
+    id<MTLBuffer> pixelBuffer;
 }
 
 - (void) setCompositeMode:(int) mode;
@@ -117,6 +121,8 @@ typedef enum VertexInputIndex {
 
 - (void) commitCurrentCommandBuffer;
 - (void) commitCurrentCommandBufferAndWait;
+- (void) commitCurrentCommandBuffer:(bool)waitUntilCompleted;
+
 - (id<MTLDevice>) getDevice;
 - (id<MTLCommandBuffer>) getCurrentCommandBuffer;
 - (id<MTLRenderCommandEncoder>) getCurrentRenderEncoder;
@@ -127,15 +133,17 @@ typedef enum VertexInputIndex {
 - (void) updateDepthDetails:(bool)depthTest;
 - (void) verifyDepthTexture;
 
-- (void) setRTT:(MetalRTTexture*)rttPtr;
+- (int) setRTT:(MetalRTTexture*)rttPtr;
 - (MetalRTTexture*) getRTT;
 - (void) clearRTT:(int)color red:(float)red green:(float)green blue:(float)blue alpha:(float)alpha
                         clearDepth:(bool)clearDepth ignoreScissor:(bool)ignoreScissor;
 - (void) setClipRect:(int)x y:(int)y width:(int)width height:(int)height;
-- (void) resetClip;
+- (void) resetClipRect;
 
-- (void) fillVB:(struct PrismSourceVertex const *)pSrcFloats colors:(char const *)pSrcColors
-                  numVertices:(int)numVerts;
+- (void) fillVB:(struct PrismSourceVertex const *)pSrcXYZUVs
+         colors:(char const *)pSrcColors
+       numQuads:(int)numQuads
+             vb:(void*)vb;
 
 - (NSInteger) drawIndexedQuads:(struct PrismSourceVertex const *)pSrcXYZUVs
                       ofColors:(char const *)pSrcColors
@@ -181,6 +189,11 @@ typedef enum VertexInputIndex {
 - (id<MTLSamplerState>) getSampler:(bool)isLinear wrapMode:(int)wrapMode;
 - (id<MTLSamplerState>) createSampler:(bool)isLinear wrapMode:(int)wrapMode;
 - (id<MTLCommandQueue>) getCommandQueue;
+
+- (void) validatePixelBuffer:(NSUInteger)length;
+- (id<MTLBuffer>) getPixelBuffer;
+- (id<MTLBuffer>) getTransientBufferWithLength:(NSUInteger)length;
+- (id<MTLBuffer>) getTransientBufferWithBytes:(const void *)pointer length:(NSUInteger)length;
 
 @end
 

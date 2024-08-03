@@ -64,8 +64,9 @@ public class SRGBTest extends VisualTestBase {
     static final float HIGH = 0.75f;
 
     // The component tolerance allows one bit of rounding when writing a color
-    // out and another bit when reading it back in.
-    static final double COMPONENT_TOLERANCE = 2.0 / 255.0;
+    // out and another bit when reading it back in. The additional 0.0001
+    // accounts for floating point precision limitations.
+    static final double COMPONENT_TOLERANCE = 2.0001 / 255.0;
 
     private enum TestColor {
         COLOR_01(LOW, MID, HIGH),
@@ -95,8 +96,9 @@ public class SRGBTest extends VisualTestBase {
         return new Point2D(centerX, centerY);
     }
 
-    // We use an AWT Robot since it is color space aware and will correctly convert
-    // from the screeen's color space to sRGB.
+    // An AWT Robot is color space aware and will correctly convert from the
+    // screeen's color space to sRGB. We use one to verify that the JavaFX
+    // Robot is performing the same conversions.
     private Color getSRGBColorAtScreenCenter() throws Exception {
         float[] sRGB = {1.0f, 1,0f, 1.0f};
         SwingUtilities.invokeAndWait(() -> {
@@ -209,9 +211,10 @@ public class SRGBTest extends VisualTestBase {
     }
 
     // Tests that pixels are correctly written out as sRGB using an AWT Robot
-    // that is color space aware. The singlePixel and screenCapture tests only
-    // verify that colors can be round-tripped, not that they are actually
-    // producing sRGB onscreen.
+    // that is color space aware. The singlePixel and screenCapture tests
+    // only verify that the JavaFX renderer and JavaFX Robot can round-trip
+    // colors but they might both be working in the wrong space. We use an
+    // AWT Robot to verify that they are working in sRGB.
     @Test
     public void sRGBPixelTest() throws Exception {
         Rectangle swatch = prepareStage();
